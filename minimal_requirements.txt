@@ -7,4 +7,4 @@ scipy
 seaborn
 scipy
 statsmodels
-tkinter
+tk
