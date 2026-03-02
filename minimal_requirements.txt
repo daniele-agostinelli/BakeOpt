@@ -5,3 +5,6 @@ pandas
 scikit-learn
 scipy
 seaborn
+scipy
+statsmodel
+tkinter
