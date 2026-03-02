@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import joblib
 import numpy as np
+import pandas as pd
 from scipy.optimize import minimize
 
 
@@ -9,7 +10,7 @@ class ModelInverterApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Inverse Model Input Finder")
-        self.geometry("650x750")
+        self.geometry("650x800")
 
         # --- Model Data ---
         self.model_bundle = None
@@ -62,7 +63,11 @@ class ModelInverterApp(tk.Tk):
             self.prescribe_vars[name] = var
 
             # Label for the output name
-            ttk.Label(target_frame, text=f"{name}:").grid(row=i, column=1, padx=5, pady=5, sticky="w")
+            if name == "H_L":
+                target_range = " (0-1):"
+            else:
+                target_range = ":"
+            ttk.Label(target_frame, text=f"{name}"+target_range).grid(row=i, column=1, padx=5, pady=5, sticky="w")
 
             # Entry for the target value
             entry = ttk.Entry(target_frame)
@@ -86,7 +91,11 @@ class ModelInverterApp(tk.Tk):
         self.fix_entries = {}
         for i, name in enumerate(self.input_names):
             var = tk.BooleanVar()
-            chk = ttk.Checkbutton(fix_frame, text=f"Fix {name}:", variable=var)
+            if name == "Time":
+                unit = " (s):"
+            else:
+                unit = " (°C):"
+            chk = ttk.Checkbutton(fix_frame, text=f"Fix {name}"+unit, variable=var)
             chk.grid(row=i, column=0, padx=5, pady=5, sticky="w")
 
             entry = ttk.Entry(fix_frame)
@@ -96,11 +105,26 @@ class ModelInverterApp(tk.Tk):
             self.fix_entries[name] = entry
         fix_frame.columnconfigure(1, weight=1)
 
-        # --- 4. Action Button ---
+        # --- 4. (Optional) Set Constraints ---
+        constraint_frame = ttk.LabelFrame(main_frame, text="4. (Optional) Set Constraints", padding="10")
+        constraint_frame.pack(fill=tk.X, pady=10)
+
+        self.constrain_hl_var = tk.BooleanVar(value=False)
+        chk_hl = ttk.Checkbutton(constraint_frame, text="Constrain H_L (0-1):", variable=self.constrain_hl_var)
+        chk_hl.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+
+        ttk.Label(constraint_frame, text="must be >=").grid(row=0, column=1, padx=5, pady=5, sticky="w")
+
+        self.constrain_hl_entry = ttk.Entry(constraint_frame)
+        self.constrain_hl_entry.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+
+        constraint_frame.columnconfigure(2, weight=1)
+
+        # --- 5. Action Button ---
         find_button = ttk.Button(main_frame, text="Find Feasible Inputs", command=self.find_inputs)
         find_button.pack(pady=10, ipady=5)
 
-        # --- 5. Results Section ---
+        # --- 6. Results Section ---
         results_frame = ttk.LabelFrame(main_frame, text="Results", padding="10")
         results_frame.pack(fill=tk.BOTH, expand=True, pady=5)
 
@@ -117,7 +141,7 @@ class ModelInverterApp(tk.Tk):
 
         try:
             self.model_bundle = joblib.load(filepath)
-            required_keys = ["poly_transformer", "models", "input_names", "output_names"]
+            required_keys = ["poly_transformer", "models", "input_names", "output_names", "selected_features"]
             if not all(key in self.model_bundle for key in required_keys):
                 raise KeyError("Model file is missing required keys.")
 
@@ -127,6 +151,37 @@ class ModelInverterApp(tk.Tk):
             messagebox.showerror("Error", f"Failed to load model file:\n{e}")
             self.model_bundle = None
             self.model_path_label.config(text="No model loaded.")
+
+    def _get_predictions(self, x, vars_to_optimize, fixed_inputs):
+        """Helper function to get all model predictions for a given input vector x."""
+        current_inputs = fixed_inputs.copy()
+        for i, name in enumerate(vars_to_optimize):
+            current_inputs[name] = x[i]
+
+        # 1. Construct raw input array
+        input_vector = np.array([current_inputs[name] for name in self.input_names]).reshape(1, -1)
+
+        # 2. Transform into full polynomial feature set
+        poly = self.model_bundle["poly_transformer"]
+        feat_vals = poly.transform(input_vector)
+        feat_names = poly.get_feature_names_out(self.input_names)
+
+        # 3. Create a DataFrame and add the constant term
+        df_poly = pd.DataFrame(feat_vals, columns=feat_names)
+        df_poly.insert(0, 'const', 1.0)
+
+        predictions = {}
+        for name in self.output_names:
+            model = self.model_bundle["models"][name]
+
+            # 4. Filter only the features that survived pruning for THIS specific target
+            subset_features = self.model_bundle["selected_features"][name]
+            X_subset = df_poly[subset_features]
+
+            # Predict using the subsetted features
+            predictions[name] = model.predict(X_subset)[0]
+
+        return predictions
 
     def find_inputs(self):
         if not self.model_bundle:
@@ -162,6 +217,15 @@ class ModelInverterApp(tk.Tk):
             messagebox.showerror("Error", "Please enter a valid number for the fixed input.")
             return
 
+        # --- Get and validate H_L constraint ---
+        min_hl_value = None
+        if self.constrain_hl_var.get():
+            try:
+                min_hl_value = float(self.constrain_hl_entry.get())
+            except ValueError:
+                messagebox.showerror("Error", "Please enter a valid number for the H_L constraint.")
+                return
+
         # --- Set up the optimization problem ---
         vars_to_optimize = [name for name in self.input_names if name not in fixed_inputs]
         if not vars_to_optimize:
@@ -173,17 +237,11 @@ class ModelInverterApp(tk.Tk):
 
         # --- Define the objective function with normalized, weighted error ---
         def objective_function(x):
-            current_inputs = fixed_inputs.copy()
-            for i, name in enumerate(vars_to_optimize):
-                current_inputs[name] = x[i]
-
-            input_vector = np.array([current_inputs[name] for name in self.input_names]).reshape(1, -1)
-            input_poly = self.model_bundle["poly_transformer"].transform(input_vector)
+            predictions = self._get_predictions(x, vars_to_optimize, fixed_inputs)
 
             total_error = 0
             for name, target_val in prescribed_targets.items():
-                model = self.model_bundle["models"][name]
-                prediction = model.predict(input_poly)[0]
+                prediction = predictions[name]
                 weight = prescribed_weights[name]
 
                 # Normalize the error to account for different output magnitudes
@@ -195,13 +253,28 @@ class ModelInverterApp(tk.Tk):
                 total_error += weight * normalized_error
             return total_error
 
+        # --- Define constraints ---
+        constraints_list = []
+        method = 'L-BFGS-B'  # Default method
+
+        if min_hl_value is not None:
+            method = 'SLSQP'  # Switch method to support constraints
+
+            def hl_constraint(x):
+                # Constraint is fun(x) >= 0
+                predictions = self._get_predictions(x, vars_to_optimize, fixed_inputs)
+                return predictions['H_L'] - min_hl_value
+
+            constraints_list = [{'type': 'ineq', 'fun': hl_constraint}]
+
         # --- Run the optimization ---
         self.update_results("Searching for a solution...")
         result = minimize(
             objective_function,
             x0=initial_guess,
             bounds=opt_bounds,
-            method='L-BFGS-B'
+            method=method,
+            constraints=constraints_list
         )
 
         # --- Process and Display the results ---
@@ -211,18 +284,23 @@ class ModelInverterApp(tk.Tk):
             found_inputs[name] = result.x[i]
 
         # Get final predictions for all outputs
-        final_input_vector = np.array([found_inputs[name] for name in self.input_names]).reshape(1, -1)
-        final_input_poly = self.model_bundle["poly_transformer"].transform(final_input_vector)
-        final_predictions = {}
-        for name in self.output_names:
-            model = self.model_bundle["models"][name]
-            final_predictions[name] = model.predict(final_input_poly)[0]
+        final_predictions = self._get_predictions(result.x, vars_to_optimize, fixed_inputs)
 
         # Build the result string
-        if result.success and result.fun < 1e-1:
-            final_text = "SUCCESS: Found a feasible solution.\n\n"
+        if not result.success:
+            # Optimizer failed to converge
+            final_text = f"ERROR: Optimization failed to find a solution.\n(Reason: {result.message})\n\n"
+        elif result.fun > 1e-1:
+            # Optimizer converged, but the error is high
+            final_text = f"WARNING: Found a solution, but the final error is high ({result.fun:.4f} > 0.1).\n"
+            final_text += "(This may mean no inputs perfectly match your targets, or the constraints are too strict.)\n"
+            final_text += f"(Termination: {result.message})\n\n"
         else:
-            final_text = f"WARNING: Could not find an optimal solution.\n(Reason: {result.message})\n\n"
+            # Optimizer converged, and the error is low
+            final_text = "SUCCESS: Found a feasible solution.\n\n"
+
+        if min_hl_value is not None:
+            final_text += f"Active Constraint: H_L >= {min_hl_value:.4f}\n\n"
 
         final_text += "--- Optimized Inputs ---\n"
         for name, val in found_inputs.items():
@@ -258,3 +336,4 @@ class ModelInverterApp(tk.Tk):
 if __name__ == "__main__":
     app = ModelInverterApp()
     app.mainloop()
+
