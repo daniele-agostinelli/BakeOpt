@@ -1,15 +1,15 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
-from sklearn.metrics import r2_score
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import seaborn as sns
 from scipy.stats import pearsonr, spearmanr
 import re, joblib
+import statsmodels.api as sm
+from sklearn.model_selection import LeaveOneOut
 
 
 # =============================================================================
@@ -97,24 +97,62 @@ class ModelTrainer:
         self.output_names = output_names
         self.poly_transformer = None
         self.models = {}
-        self.scores = {}
+        self.scores = {} # Stores R2, Adj R2, Pred R2
+        self.selected_features = {}  # Stores features after pruning
         self.is_fitted = False
 
-    def fit(self, data, poly_order):
+    def calculate_loocv_r2(self, X, y):
+        """Calculates the Predicted R-squared using Leave-One-Out Cross-Validation."""
+        loo = LeaveOneOut()
+        y_pred_cv = np.zeros_like(y, dtype=float)
+        X_values = X.values if hasattr(X, 'values') else X
+
+        for train_index, test_index in loo.split(X_values):
+            X_train_cv, X_test_cv = X_values[train_index], X_values[test_index]
+            y_train_cv = y[train_index]
+            # Fit model on N-1 points
+            model_cv = sm.OLS(y_train_cv, X_train_cv).fit()
+            # Predict the 1 left-out point
+            y_pred_cv[test_index] = model_cv.predict(X_test_cv)[0]
+
+        press = np.sum((y - y_pred_cv) ** 2)
+        sst = np.sum((y - np.mean(y)) ** 2)
+        r2_pred = 1 - (press / sst)
+        return r2_pred
+
+    def fit(self, data, poly_order, use_pruning=False, p_threshold=0.15):
         try:
             X = data[self.input_names].values
-            self.poly_transformer = PolynomialFeatures(degree=poly_order, include_bias=True)
+            self.poly_transformer = PolynomialFeatures(degree=poly_order, include_bias=False)
             X_poly = self.poly_transformer.fit_transform(X)
+            feat_names = self.poly_transformer.get_feature_names_out(self.input_names).tolist()
+
+            X_full = pd.DataFrame(X_poly, columns=feat_names)
+            X_full.insert(0, 'const', 1.0)
 
             for name in self.output_names:
                 y = data[name].values.astype(float)
-                model = LinearRegression()
-                model.fit(X_poly, y)
-                self.models[name] = model
+                current_X = X_full.copy()
 
-                # Calculate and store R-squared score
-                y_pred = model.predict(X_poly)
-                self.scores[name] = r2_score(y, y_pred)
+                # Backward Elimination
+                if use_pruning:
+                    while True:
+                        model = sm.OLS(y, current_X).fit()
+                        p_values = model.pvalues.drop('const', errors='ignore')
+                        if p_values.empty or p_values.max() <= p_threshold:
+                            break
+                        current_X = current_X.drop(columns=[p_values.idxmax()])
+
+                model = sm.OLS(y, current_X).fit()
+                self.models[name] = model
+                self.selected_features[name] = current_X.columns.tolist()
+
+                # Metrics
+                self.scores[name] = {
+                    'r2': model.rsquared,
+                    'adj_r2': model.rsquared_adj,
+                    'pred_r2': self.calculate_loocv_r2(current_X, y)
+                }
 
             self.is_fitted = True
             return True, "Models fitted successfully!"
@@ -128,9 +166,15 @@ class ModelTrainer:
         if input_data.ndim == 1:
             input_data = input_data.reshape(1, -1)
         input_poly = self.poly_transformer.transform(input_data)
+        feat_names = self.poly_transformer.get_feature_names_out(self.input_names).tolist()
+        df_poly = pd.DataFrame(input_poly, columns=feat_names)
+        df_poly.insert(0, 'const', 1.0)
+
         predictions = {}
         for name in self.output_names:
-            pred_values = self.models[name].predict(input_poly)
+            # Subset only the features that survived pruning for this specific target
+            X_subset = df_poly[self.selected_features[name]]
+            pred_values = np.array(self.models[name].predict(X_subset))
             predictions[name] = pred_values
         return predictions
 
@@ -139,41 +183,39 @@ class ModelTrainer:
             return "Model not fitted for this output."
 
         model = self.models[output_name]
-        #local_input_names = [name.replace('_', '_') for name in self.input_names]
-        feature_names = self.poly_transformer.get_feature_names_out(self.input_names)
-
-        intercept = model.intercept_
-        coeffs = model.coef_
+        params = model.params
 
         latex_parts = []
 
         # Use a counter to break the line every few terms
         term_count = 1
-        terms_per_line = 7  # Adjust this value based on your panel width
+        terms_per_line = 7  # Adjust this value based on panel width
 
-        # Start from index 1 to skip the intercept term
-        temp = f"{output_name} = {intercept:.2e}"        # Start the equation with the output name and intercept term
-        for i, (coeff, name) in enumerate(zip(coeffs, feature_names)):
-            if i == 0:  # Skip the intercept term
+        # 1. Escape underscores in the output name for LaTeX
+        clean_out_name = output_name.replace("_", r"\_")
+        temp = f"{clean_out_name} = {params['const']:.2e}"
+
+        for i, (name, coeff) in enumerate(params.items()):
+            if name == 'const' or abs(coeff) < 1e-12:
                 continue
 
-            if abs(coeff) < 1e-6:
-                continue
-
-            # Format term for LaTeX (e.g., Temp\_Bottom^{2} \cdot Time)
+            # 2. Format name: replace spaces with cdot, fix powers, and escape underscores
             formatted_name = name.replace(" ", r" \cdot ")
             formatted_name = re.sub(r'\^(\d+)', r'^{\1}', formatted_name)
+            formatted_name = formatted_name.replace("_", r"\_")  # Escape underscores
 
-            sign = "-" if coeff < 0 else "+"
-            temp = temp + f" {sign} {abs(coeff):.2e} \\cdot {formatted_name}"
+            sign = " - " if coeff < 0 else " + "
+            temp = temp + rf"{sign}{abs(coeff):.2e} \cdot {formatted_name}"
 
-            # reset text
             if term_count % terms_per_line == 0:
                 latex_parts.append(temp)
-                temp = ""
+                temp = ""  # Reset for next line
 
             term_count += 1
-        latex_parts.append(temp)
+
+        # 3. ONLY append if temp is not empty string
+        if temp.strip():
+            latex_parts.append(temp)
 
         return latex_parts
 
@@ -190,7 +232,8 @@ class ModelTrainer:
                 "models": self.models,
                 "scores": self.scores,
                 "input_names": self.input_names,
-                "output_names": self.output_names
+                "output_names": self.output_names,
+                "selected_features": self.selected_features
             }
             joblib.dump(bundle, filepath)
             return True, f"Model exported successfully to {filepath}"
@@ -208,7 +251,7 @@ class App(tk.Tk):
         self.model_trainer = ModelTrainer(list(config.INPUTS.keys()), config.OUTPUTS)
         self.current_ranges = config.INPUTS
 
-        self.title("Pizza Baking Analysis Tool")
+        self.title("Baking Analysis Tool")
         self.geometry("1400x900")
         self._create_widgets()
 
@@ -236,6 +279,17 @@ class App(tk.Tk):
         ttk.Radiobutton(model_frame, text="Linear (Order 1)", variable=self.model_type, value=1).pack(anchor='w')
         ttk.Radiobutton(model_frame, text="Quadratic (Order 2)", variable=self.model_type, value=2).pack(anchor='w')
         ttk.Radiobutton(model_frame, text="Cubic (Order 3)", variable=self.model_type, value=3).pack(anchor='w')
+        # pruning toggle
+        self.do_pruning = tk.BooleanVar(value=False)
+        ttk.Checkbutton(model_frame, text="Pruning", variable=self.do_pruning).pack(pady=5, anchor='w')
+        p_thr_container = ttk.Frame(model_frame)
+        p_thr_container.pack(anchor='w', pady=(0, 10)) 
+
+        ttk.Label(p_thr_container, text="p-thr:").pack(side=tk.LEFT, padx=(5, 5))
+        self.p_val_entry = ttk.Entry(p_thr_container, width=6)
+        self.p_val_entry.insert(0, "0.15")
+        self.p_val_entry.pack(side=tk.LEFT)
+
         self.fit_button = ttk.Button(model_frame, text="Fit", command=self._fit_models, state=tk.DISABLED)
         self.fit_button.pack(pady=5)
         # export button
@@ -326,7 +380,8 @@ class App(tk.Tk):
             return
 
         poly_order = self.model_type.get()
-        success, msg = self.model_trainer.fit(self.data_manager.processed_data, poly_order)
+        p_thr = float(self.p_val_entry.get())
+        success, msg = self.model_trainer.fit(self.data_manager.processed_data, poly_order,self.do_pruning.get(),p_thr)
 
         if success:
             messagebox.showinfo("Success", msg)
@@ -356,13 +411,15 @@ class App(tk.Tk):
 
         if self.model_trainer.is_fitted and output_name and output_name != 'Select Output':
             equations = self.model_trainer.get_model_equation(output_name)
-            score = self.model_trainer.scores.get(output_name, 0)
-            score_text = f"$R^2 = {score:.4f}$"
+            score_data = self.model_trainer.scores.get(output_name, {})
+            r2 = score_data.get('r2', 0)
+            score_text = f"$R^2 = {r2:.4f}$"
 
             # Display score and equation on the figure
             self.eq_fig.text(0.02, 0.7, score_text, va='top', ha='left', fontsize=11)
             for i,equation in enumerate(equations):
-                self.eq_fig.text(0.02, 0.45-0.10*i, f"${equation}$", va='top', ha='left', fontsize=9)
+                if equation.strip():
+                    self.eq_fig.text(0.02, 0.45-0.10*i, f"${equation}$", va='top', ha='left', fontsize=9)
 
         self.eq_canvas.draw()
 
@@ -481,8 +538,6 @@ class App(tk.Tk):
         handles, labels = ax.get_legend_handles_labels()
         if labels:
             ax.legend()
-        #else:
-        #    print("No artists with labels found to put in legend.")
 
         self.fig.colorbar(contour, ax=ax, label=output_name)
         self.canvas.draw()
@@ -519,6 +574,14 @@ class App(tk.Tk):
         ax.set_aspect('equal', adjustable='box')
         ax.set_xlim(lims)
         ax.set_ylim(lims)
+
+        # Metrics Text Box
+        metrics = self.model_trainer.scores[output_name]
+        text = (f"$R^2$: {metrics['r2']:.3f}\n"
+                f"Adj $R^2$: {metrics['adj_r2']:.3f}\n"
+                f"Pred $R^2$: {metrics['pred_r2']:.3f}")
+        ax.text(0.05, 0.95, text, transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
 
         ax.set_xlabel("Actual Values")
         ax.set_ylabel("Predicted Values")
@@ -580,23 +643,19 @@ class App(tk.Tk):
                                           command=lambda *_: self._setup_corr_controls())
         self.corr_z_menu.pack(side='left', padx=(0, 15))
 
-        #print("Current correlation type:", self.corr_type.get())
         self._draw_correlations()
         return
 
     def _on_corr_type_change(self, selection):
         """Callback when the user selects a correlation type."""
         self.corr_type.set(selection)  # update StringVar explicitly
-        #print("Correlation type changed to:", selection)
         self._draw_correlations()
 
     def _draw_correlations(self, *args):
         #corr_type = "Pearson"
         labels = [self.corr_x.get(),self.corr_y.get(),self.corr_z.get()]
-        #print(labels)
         data = self.data_manager.processed_data
         X = data[labels].values
-        #print(X)
         variables = [np.asarray(X[:,0]), np.asarray(X[:,1]), np.asarray(X[:,2])]
         n = len(variables)
 
@@ -638,4 +697,3 @@ class App(tk.Tk):
 if __name__ == "__main__":
     app = App(Config)
     app.mainloop()
-
