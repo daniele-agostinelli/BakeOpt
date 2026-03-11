@@ -25,7 +25,11 @@ There are two main Tkinter-based graphical user interfaces (GUIs):
 <img width="649" height="975" alt="Model_inverter" src="https://github.com/user-attachments/assets/8a35c7ac-e89b-490e-a66f-ab20e4ae929e" />
 
 ## 🛠️ Prerequisites
-These applications were developed with Python 3.12 on Ubuntu 24.04 and libraries as detailed in requirements.txt. Minimal requirements are outlined in minimal_requirements.txt.
+These applications were developed and tested with Python 3.12 on Ubuntu 24.04 and libraries as detailed in requirements.txt. 
+You can install the used packages via
+```bash
+pip install -r requirements.txt
+```
 
 ## 📂 Expected Data Format
 The Model Fitter & Analyzer expects a .csv file with the following specific columns to successfully process the data:
