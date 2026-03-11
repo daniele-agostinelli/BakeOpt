@@ -1,0 +1,3 @@
+[submodule "browningIndex"]
+	path = browningIndex
+	url = https://github.com/boso94/browningIndex.git
