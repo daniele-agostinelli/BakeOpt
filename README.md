@@ -13,11 +13,16 @@ There are two main Tkinter-based graphical user interfaces (GUIs):
 - Equation Rendering: Displays the fitted mathematical equations and $R^2$ metrics dynamically.
 - Model Export: Saves the fitted models, polynomial transformers, and selected features into a .joblib bundle for later use.
 
+<img width="1400" height="938" alt="Fitter_contour" src="https://github.com/user-attachments/assets/50212f3c-e717-4f2a-8491-4f738eff2cc5" />
+<img width="1400" height="938" alt="Fitter_pred_vs_real" src="https://github.com/user-attachments/assets/330741d3-236a-48dd-bbad-9b9e05d2f1ad" />
+
 ## Inverse Model Input Finder
 - Optimization: Uses scipy.optimize.minimize (L-BFGS-B or SLSQP) to reverse-engineer the required inputs (Bottom Temperature, ΔT, Time) to achieve user-prescribed target outputs (Top/Bottom Browning Index, Humidity Loss).
 - Customizable Weights: Assign specific weights to different target outputs to prioritize certain baking outcomes over others.
 - Parameter Fixing: Lock specific input variables (e.g., fixing the baking time) while optimizing the others.
 - Constraints: Apply inequality constraints, such as ensuring Humidity Loss stays above a certain threshold.
+
+<img width="649" height="975" alt="Model_inverter" src="https://github.com/user-attachments/assets/8a35c7ac-e89b-490e-a66f-ab20e4ae929e" />
 
 ## 🛠️ Prerequisites
 These applications were developed with Python 3.12 on Ubuntu 24.04 and libraries as detailed in requirements.txt. Minimal requirements are outlined in minimal_requirements.txt.
